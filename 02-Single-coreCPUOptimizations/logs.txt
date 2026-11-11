@@ -1,0 +1,128 @@
+1.2 - Basic testing
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt default --show-hash
+Using kernel [blur], variant [seq], tiling [default]
+Computation completed after 100 iterations
+1246.842
+SHA256 key stored in data/hash/blur-seq-default-dim-1024-iter-100-arg-none.sha256
+
+1.3- Recompiling without default optimisation flags:
+
+genevievec@az4-a7900-2:~/easypap-se$ cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O0" -DCMAKE_CXX_FLAGS_RELEASE="-O0"
+...
+
+genevievec@az4-a7900-2:~/easypap-se$ cmake --build build --parallel
+...
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt default --show-hash
+Using kernel [blur], variant [seq], tiling [default]
+Computation completed after 100 iterations
+5433.210
+SHA256 key stored in data/hash/blur-seq-default-dim-1024-iter-100-arg-none.sha256
+genevievec@az4-a7900-2:~/easypap-se$ 
+
+
+--- Side note: Working on nano
+Alt+A (or Ctrl+6) to drop an anchor and start highlighting
+Alt+6 copy highlighted text
+Ctrl+U paste
+
+---
+
+2.1 - no border (deafult_nb)
+
+---After writing code, dont forget to:
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O0" -DCMAKE_CXX_FLAGS_RELEASE="-O0" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+---
+
+Result:
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt default_nb --show-hash
+Using kernel [blur], variant [seq], tiling [default_nb]
+Computation completed after 100 iterations
+5354.464
+SHA256 key stored in data/hash/blur-seq-default_nb-dim-1024-iter-100-arg-none.sha256
+
+
+2.2 - Loop Unrolling on X-axis (optim1)
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt optim1 --show-hash
+Using kernel [blur], variant [seq], tiling [optim1]
+Computation completed after 100 iterations
+5114.760
+SHA256 key stored in data/hash/blur-seq-optim1-dim-1024-iter-100-arg-none.sha256
+
+
+
+2.3 - Loop Unrolling on Y-axis (optim2)
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt optim2 --show-hash
+Using kernel [blur], variant [seq], tiling [optim2]
+Computation completed after 100 iterations
+5182.366
+SHA256 key stored in data/hash/blur-seq-optim2-dim-1024-iter-100-arg-none.sha256
+
+
+Observation: Unrolling the y-axis loop unexpectedly increased the execution time (from ~5114ms to ~5182ms).
+Explanation: While unrolling removes the small overhead of loop counting, it exposes a much larger bottleneck. To process a single pixel's 3x3 neighborhood, the code makes 37 separate function calls (9 pixels × 4 color extractions, plus 1 final color pack). Because the code is compiled with -O0 (no compiler optimisations), these functions are not automatically inlined. The heavy CPU cost of jumping back and forth in memory for 37 function calls per pixel completely outweighs the tiny amount of time saved by deleting the yloc loop.
+
+
+2.4 - Inline Function Calls (optim3)
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt optim3 --show-hash
+Using kernel [blur], variant [seq], tiling [optim3]
+Computation completed after 100 iterations
+2733.973
+SHA256 key stored in data/hash/blur-seq-optim3-dim-1024-iter-100-arg-none.sha256
+
+Observation: Incredible! We just cut the execution time almost in half!
+This proves exactly how expensive function calls are at the hardware level.
+
+
+2.5 - Variables Rotation (optim4)
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt optim4 --show-hash
+Using kernel [blur], variant [seq], tiling [optim4]
+Computation completed after 100 iterations
+1449.473
+SHA256 key stored in data/hash/blur-seq-optim4-dim-1024-iter-100-arg-none.sha256
+
+
+2.6 - Manage Borders (optim5)
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt optim5 --show-hash
+Using kernel [blur], variant [seq], tiling [optim5]
+Computation completed after 100 iterations
+1584.361
+SHA256 key stored in data/hash/blur-seq-optim5-dim-1024-iter-100-arg-none.sha256
+
+
+2.7 - Reduction (optim6)
+Already implemented during the variables rotation in optim4.
+
+
+2.8 - Compare with Different Levels of Compiler Optimisation
+
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+
+---Result:
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt default
+Using kernel [blur], variant [seq], tiling [default]
+Computation completed after 100 iterations
+1249.174
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -n -k blur --load-image images/1024.png -i 100 -v seq -wt optim4
+Using kernel [blur], variant [seq], tiling [optim4]
+Computation completed after 100 iterations
+461.541
+
+---
+If we divide the compiler's best time (1249.17 ms) by our hand-optimized time (461.54 ms), we get 2.7.
+This means our hand-tuned code is 2.7x faster than the compiler's best attempt!
+
+
+---end of lab 2
