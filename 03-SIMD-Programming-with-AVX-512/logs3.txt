@@ -1,0 +1,382 @@
+PACC LAB 3
+
+1.1
+As usual,
+
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O0" -DCMAKE_CXX_FLAGS_RELEASE="-O0" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+
+--Yields:--
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v seq -n -sh
+Using kernel [spin], variant [seq], tiling [default]
+Computation completed after 500 iterations
+14246.517
+SHA256 key stored in data/hash/spin-seq-default-dim-1024-iter-500-arg-none.sha256
+---
+
+1.2
+--->-O3 (no fast-math)
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O3" -DCMAKE_CXX_FLAGS_RELEASE="-O3" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+./run -k spin -i 500 -v seq -n -sh
+
+7537.309
+
+
+--->-O1
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O1" -DCMAKE_CXX_FLAGS_RELEASE="-O1" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+./run -k spin -i 500 -v seq -n -sh
+
+8038.404
+
+
+--->-O2
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O2" -DCMAKE_CXX_FLAGS_RELEASE="-O2" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+./run -k spin -i 500 -v seq -n -sh
+
+7538.001
+
+--->-O3 + fast-math:
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O3 -ffast-math" -DCMAKE_CXX_FLAGS_RELEASE="-O3 -ffast-math" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+./run -k spin -i 500 -v seq -n -sh
+
+6266.209
+
+--
+Interpretation on these results:
+The Baseline Drop: The execution time drops massively from -O0 to -O1 because fundamental optimizations (like holding variables in CPU registers instead of constantly fetching from memory) are applied.
+
+The Plateau: The times for -O2 and -O3 are nearly identical. The compiler has exhausted all safe optimizations for this specific code structure.
+
+The Math Boost: Adding -ffast-math drops the time from ~7537 ms to ~6266 ms. As the pdf with the lab instructions explains, this flag sacrifices strict floating-point precision for performance. Since the spin kernel relies heavily on expensive math functions, skipping strict IEEE rules yields a massive speedup.
+
+--- code analysis:
+
+
+
+2.1
+Copy-pasting the code provided for the approx fucntions, and using them in a new compute_color_approx and spin_compute_approx, 
+
+After all changes, again:
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O3 -ffast-math" -DCMAKE_CXX_FLAGS_RELEASE="-O3 -ffast-math" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+
+---Sadly, previous node wasn't free anymore so jumped to: ssh az4-a7900-0.dalek.lip6.srun
+genevievec@az4-a7900-0:~/easypap-se$ ./run -k spin -i 500 -v approx -n -sh
+Using kernel [spin], variant [approx], tiling [default]
+Computation completed after 500 iterations
+2218.170
+
+--->Checking the hash:
+genevievec@az4-a7900-0:~/easypap-se$ cat data/hash/spin-approx-default-dim-1024-iter-500-arg-none.sha256
+228757ae794fa77160d36b911a932e206b3a5b0f2531f2009274b2cb570478c9
+
+Hash doesn't match the expected one. "Hashes for Validation" section on Page 7 of, asks to test # WITHOUT -ffast-math. Since the manual tells us to keep -ffast-math enabled for our performance evaluations, we can confidently leave it on and move forward to Section 2.2. We'll test the hashes in the dedicated section later.
+
+2.2.1 - compute_color_simd_v0
+Here is a visual map of exactly what we want in simd_v0:
+1. THE VECTOR REGISTERS (What we started with)
+ r_i: [ i0 | i1 | i2 | i3 | i4 | ... | i15 ]  (One massive 512-bit register)
+ r_j: [ j0 | j1 | j2 | j3 | j4 | ... | j15 ]  (One massive 512-bit register)
+          |    |    |    |    |          |
+          v    v    v    v    v          v
+ 2. THE UNPACKING (Your pointer casting)
+ ptr_i: i0, i1, i2... (Spilled out into standard memory)
+ ptr_j: j0, j1, j2... (Spilled out into standard memory)
+          |    |    |    |    |          |
+          v    v    v    v    v          v
+ 3. THE BOTTLENECK (Your sequential loop)
+        (16 separate, slow trips through compute_color_approx)
+          |    |    |    |    |          |
+          v    v    v    v    v          v
+ 4. THE PACKING (Your _mm512_loadu_epi32)
+       [ c0 | c1 | c2 | c3 | c4 | ... | c15 ] (Crammed back into one register)
+
+
+---
+static __m512i compute_color_simd_v0(__m512i r_i, __m512i r_j) {
+    int32_t* ptr_i = (int32_t*)&r_i;
+    int32_t* ptr_j = (int32_t*)&r_j;
+    int32_t temp_out[16];
+
+    for (int k = 0; k < 16; k++) {
+        temp_out[k] = compute_color_approx(ptr_i[k], ptr_j[k]);
+    }
+
+    return _mm512_loadu_epi32(temp_out);
+}
+---
+
+---> As instructed, for next assignemnts the cmake commands will change to:
+rm -rf build
+cmake -S . -B build -DCMAKE_C_FLAGS_RELEASE="-O3 -ffast-math -march=znver4 -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx512cd -mavx512ifma -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg" -DCMAKE_CXX_FLAGS_RELEASE="-O3 -ffast-math -march=znver4 -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx512cd -mavx512ifma -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg" -DEXTERNAL_EASYTOOLS=OFF
+cmake --build build --parallel
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v0 -n -sh
+Using kernel [spin], variant [simd_v0], tiling [default]
+Computation completed after 500 iterations
+2397.597
+SHA256 key stored in data/hash/spin-simd_v0-default-dim-1024-iter-500-arg-none.sha256
+
+2.2.2 
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v0-default-dim-1024-iter-500-arg-none.sha256
+b9bca2e37af42663b539363f64c7941d041d8a383e9118feca94c1363003e709
+
+The execution time increased slightly to ~2397 ms. This is completely expected because simd_v0 is not actually performing parallel vector math. Instead, it pays a performance penalty for moving data back and forth between vector registers and standard memory.
+
+2.3.1 - fmodf_approx_simd
+static inline __m512 fmodf_approx_simd(__m512 r_x, __m512 r_y) {
+    __m512 r_div = _mm512_div_ps(r_x, r_y);
+    __m512 r_trunc = _mm512_roundscale_ps(r_div, _MM_FROUND_TO_ZERO);
+    __m512 r_mul = _mm512_mul_ps(r_trunc, r_y);
+    return _mm512_sub_ps(r_x, r_mul);
+}
+
+2.3.2 - compute_color_simd_v1
+---
+static inline __m512i compute_color_simd_v1(__m512i r_i, __m512i r_j) {
+    int32_t* ptr_i = (int32_t*)&r_i;
+    int32_t* ptr_j = (int32_t*)&r_j;
+    
+    float temp_angles[16];
+    float temp_ratios[16];
+    int32_t temp_out[16];
+
+    // Sequential math up to angle
+    for (int k = 0; k < 16; k++) {
+        float atan2f_in1 = (float)DIM / 2.f - (float)ptr_i[k];
+        float atan2f_in2 = (float)ptr_j[k] - (float)DIM / 2.f;
+        temp_angles[k] = atan2f_approx(atan2f_in1, atan2f_in2) + M_PIsp + base_angle;
+    }
+
+    // SIMD MATH: fmodf and ratio (all 16 at once!)
+    __m512 r_angle = _mm512_loadu_ps(temp_angles);
+    __m512 r_pi_4  = _mm512_set1_ps(M_PIsp / 4.f);
+    __m512 r_pi_8  = _mm512_set1_ps(M_PIsp / 8.f);
+
+    __m512 r_fmod  = fmodf_approx_simd(r_angle, r_pi_4);
+    __m512 r_sub   = _mm512_sub_ps(r_fmod, r_pi_8);
+    __m512 r_div   = _mm512_div_ps(r_sub, r_pi_8);
+    __m512 r_ratio = _mm512_abs_ps(r_div); // SIMD version of fabsf
+
+    _mm512_storeu_ps(temp_ratios, r_ratio); // Save ratios back to memory
+
+    // Sequential color packing
+    for (int k = 0; k < 16; k++) {
+        float ratio = temp_ratios[k];
+        uint32_t r = blue_r + (yellow_r - blue_r) * ratio;
+        uint32_t g = blue_g + (yellow_g - blue_g) * ratio;
+        uint32_t b = blue_b + (yellow_b - blue_b) * ratio;
+        uint32_t a = blue_a + (yellow_a - blue_a) * ratio;
+        temp_out[k] = ezv_rgba(r, g, b, a);
+    }
+
+    return _mm512_loadu_epi32(temp_out);
+}
+---
+
+This code compiles BUT the compiler is warning us because we did something dangerous in C: we took a hardware vector register (r_i) and forcibly cast it into a standard memory pointer (int32_t*)&r_i.
+
+If you look at the "PACC - Parallelism and Accelerators for Cluster Computing" document you provided, specifically on the "Intrinsics – Display for Debug" page, the teacher explicitly warns against this:uint8_t* T = (uint8_t*)ri8_512; // cast a register into an address, FORBIDDEN!!
+
+So, we add
+
+    // 1. Create standard arrays to hold the data
+    int32_t temp_i[16];
+    int32_t temp_j[16];
+
+    // 2. Safely store the vector registers into those arrays
+    _mm512_storeu_epi32(temp_i, r_i);
+    _mm512_storeu_epi32(temp_j, r_j);
+
+at the top of both compute_color_simd_v0 and compute_color_simd_v1 with this proper storage method.
+
+
+---> New compute_color_simd_v0 fucntion:
+static inline __m512i compute_color_simd_v0(__m512i r_i, __m512i r_j) {
+    int32_t temp_i[16];
+    int32_t temp_j[16];
+    int32_t temp_out[16];
+
+    // Safely dump vector registers to memory
+    _mm512_storeu_epi32(temp_i, r_i);
+    _mm512_storeu_epi32(temp_j, r_j);
+
+    for (int k = 0; k < 16; k++) {
+        temp_out[k] = compute_color_approx(temp_i[k], temp_j[k]);
+    }
+
+    return _mm512_loadu_epi32(temp_out);
+}
+
+---> New compute_color_simd_v1 fucntion:
+static inline __m512i compute_color_simd_v1(__m512i r_i, __m512i r_j) {
+    int32_t temp_i[16];
+    int32_t temp_j[16];
+    
+    // Safely dump vector registers to memory
+    _mm512_storeu_epi32(temp_i, r_i);
+    _mm512_storeu_epi32(temp_j, r_j);
+    
+    float temp_angles[16];
+    float temp_ratios[16];
+    int32_t temp_out[16];
+
+    // 1. LOOP 1: Sequential math up to 'angle'
+    for (int k = 0; k < 16; k++) {
+        float atan2f_in1 = (float)DIM / 2.f - (float)temp_i[k];
+        float atan2f_in2 = (float)temp_j[k] - (float)DIM / 2.f;
+        temp_angles[k] = atan2f_approx(atan2f_in1, atan2f_in2) + M_PIsp + base_angle;
+    }
+
+    // 2. SIMD MATH: fmodf and ratio (all 16 at once!)
+    __m512 r_angle = _mm512_loadu_ps(temp_angles);
+    __m512 r_pi_4  = _mm512_set1_ps(M_PIsp / 4.f);
+    __m512 r_pi_8  = _mm512_set1_ps(M_PIsp / 8.f);
+
+    __m512 r_fmod  = fmodf_approx_simd(r_angle, r_pi_4);
+    __m512 r_sub   = _mm512_sub_ps(r_fmod, r_pi_8);
+    __m512 r_div   = _mm512_div_ps(r_sub, r_pi_8);
+    __m512 r_ratio = _mm512_abs_ps(r_div); // SIMD version of fabsf
+
+    _mm512_storeu_ps(temp_ratios, r_ratio); // Save ratios back to memory
+
+    // 3. LOOP 2: Sequential color packing
+    for (int k = 0; k < 16; k++) {
+        float ratio = temp_ratios[k];
+        uint32_t r = blue_r + (yellow_r - blue_r) * ratio;
+        uint32_t g = blue_g + (yellow_g - blue_g) * ratio;
+        uint32_t b = blue_b + (yellow_b - blue_b) * ratio;
+        uint32_t a = blue_a + (yellow_a - blue_a) * ratio;
+        temp_out[k] = ezv_rgba(r, g, b, a);
+    }
+
+    return _mm512_loadu_epi32(temp_out);
+}
+---
+
+2.3.3
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v1 -n -sh
+Using kernel [spin], variant [simd_v1], tiling [default]
+Computation completed after 500 iterations
+312.771
+SHA256 key stored in data/hash/spin-simd_v1-default-dim-1024-iter-500-arg-none.sha256
+
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v1-default-dim-1024-iter-500-arg-none.sha256
+4adcb4af8ba86e480479a6f295e091bc9758fc8d88b67a0b039a2acafb1cc0e1g
+
+~312 ms! By keeping the data inside the vector registers for the fmodf and ratio math, we chopped the execution time down by nearly 8x compared to our unpacked v0 version.
+
+
+2.4.1 - rgba_simd
+
+
+2.4.2 - compute_color_simd_v2
+
+
+2.4.3
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v2 -n -sh
+Using kernel [spin], variant [simd_v2], tiling [default]
+Computation completed after 500 iterations
+297.550
+SHA256 key stored in data/hash/spin-simd_v2-default-dim-1024-iter-500-arg-none.sha256
+
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v2-default-dim-1024-iter-500-arg-none.sha256
+c930314f920fcf3e6f3d93ec42f26019cdb76d7bae7401396f8983011d00c47e
+
+
+
+2.5
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v3 -n -sh
+Using kernel [spin], variant [simd_v3], tiling [default]
+Computation completed after 500 iterations
+396.272
+SHA256 key stored in data/hash/spin-simd_v3-default-dim-1024-iter-500-arg-none.sha256
+
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v3-default-dim-1024-iter-500-arg-none.sha256
+d76cfb784b4b41fc405c2488e159ca515c8cf0c4bb45698f222d7d39831f19f0
+
+It actually went up to ~396 ms! (v2 was ~297 ms).
+Even though our code is 100% parallel now, we introduced a new bottleneck. Passing massive 512-bit vector registers back and forth between separate function calls (atanf_approx_simd and atan2f_approx_simd) creates heavy overhead. Plus, our vector mask-and-blend logic forces the CPU to calculate both sides of every if/else branch, meaning it is doing more total math than the scalar version!
+
+2.6.1 - Inline
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v4 -n -sh
+Using kernel [spin], variant [simd_v4], tiling [default]
+Computation completed after 500 iterations
+396.481
+SHA256 key stored in data/hash/spin-simd_v4-default-dim-1024-iter-500-arg-none.sha256
+
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v4-default-dim-1024-iter-500-arg-none.sha256
+d76cfb784b4b41fc405c2488e159ca515c8cf0c4bb45698f222d7d39831f19f0
+
+---
+Execution time has barely moved.
+
+2.6.2 - FMA Fused Multiply-Add
+If you look closely at your simd_v4 code, you will see several places where we do this inefficient two-step process.
+For example, in the denominator of atanf Path 2:
+_mm512_add_ps(r_1, _mm512_mul_ps(r_028, r_z2)) 
+And in all four color channels:
+_mm512_add_ps(r_blue_r, _mm512_mul_ps(r_diff_r, r_ratio))
+To combine these, we need a specific AVX-512 intrinsic that performs the operation (a * b) + c.
+
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v4 -n -sh
+Using kernel [spin], variant [simd_v4], tiling [default]
+Computation completed after 500 iterations
+432.053
+SHA256 key stored in data/hash/spin-simd_v4-default-dim-1024-iter-500-arg-none.sha256
+
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v4-default-dim-1024-iter-500-arg-none.sha256
+7b8920b7608eae9a6d1cab01766179e569f66ed3fdfb1cd54279cb171a1d995d
+
+2.7
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v5 -n -sh
+Using kernel [spin], variant [simd_v5], tiling [default]
+Computation completed after 500 iterations
+432.355
+SHA256 key stored in data/hash/spin-simd_v5-default-dim-1024-iter-500-arg-none.sha256
+
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v5-default-dim-1024-iter-500-arg-none.sha256
+7b8920b7608eae9a6d1cab01766179e569f66ed3fdfb1cd54279cb171a1d995d
+
+That execution time of ~432 ms is virtually identical to your v4 time!
+Why didn't our manual "Loop Invariant Code Motion" (pulling constants out of the loops) speed things up? Because we are compiling with the aggressive -O3 flag. The GCC compiler is incredibly smart and was actually already pulling those constants out for us behind the scenes in v4!
+
+2.8.1
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v6u2 -n -sh 
+Using kernel [spin], variant [simd_v6u2], tiling [default]
+Computation completed after 500 iterations
+385.485
+SHA256 key stored in data/hash/spin-simd_v6u2-default-dim-1024-iter-500-arg-none.sha256
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v6u2-default-dim-1024-iter-500-arg-none.sha256
+7b8920b7608eae9a6d1cab01766179e569f66ed3fdfb1cd54279cb171a1d995d
+
+
+2.8.2
+
+genevievec@az4-a7900-2:~/easypap-se$ ./run -k spin -i 500 -v simd_v6u4 -n -sh
+Using kernel [spin], variant [simd_v6u4], tiling [default]
+Computation completed after 500 iterations
+393.005
+SHA256 key stored in data/hash/spin-simd_v6u4-default-dim-1024-iter-500-arg-none.sha256
+genevievec@az4-a7900-2:~/easypap-se$ cat data/hash/spin-simd_v6u4-default-dim-1024-iter-500-arg-none.sha256
+7b8920b7608eae9a6d1cab01766179e569f66ed3fdfb1cd54279cb171a1d995dg
+
+The execution time of ~393 ms is actually slightly higher than our 2-order unroll (~385 ms).
+This is a perfect example of a hardware limit called register spilling. An AVX-512 CPU has exactly 32 vector registers available. By unrolling 4 times and trying to compute 64 pixels at once with all those intermediate variables, our code required more registers than the hardware physically possesses. The CPU was forced to temporarily "spill" data out to slower cache memory during the loop, which canceled out the speed benefits of unrolling. The 2-order unroll was the "sweet spot" for this specific processor.
+
+---
